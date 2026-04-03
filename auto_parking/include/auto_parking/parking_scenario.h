@@ -35,7 +35,9 @@ private:
     size_t path_progress_ = 0;
     double timeout_ = 60.0;  // max parking time (seconds)
     double elapsed_time_ = 0.0;
-    double dt_ = 0.01;       // control loop period (seconds)
+    // control loop period (seconds)
+    // The demo/tests in this repo use dt=0.02 (50Hz), so keep this consistent.
+    double dt_ = 0.02;
 };
 
 }  // namespace auto_parking

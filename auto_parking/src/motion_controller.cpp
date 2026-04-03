@@ -22,22 +22,69 @@ ControlCommand MotionController::compute(Pose2D current_pose,
         return cmd;
     }
 
-    // Find the closest path point to current position for tracking progress
+    // Find the closest path point to current position for tracking progress.
+    // Deep performance optimization:
+    // - Use squared distances (avoid sqrt in distanceTo()).
+    // - For long paths, scan a local window around the previous closest point.
+    // - Near the end, fall back to full scan for reliable "finished" detection.
+    const size_t n = path.size();
+    closest_idx_ = (closest_idx_ < n) ? closest_idx_ : 0;
+
+    auto distSq = [&](const Point2D& a, const Point2D& b) -> double {
+        const double dx = a.x - b.x;
+        const double dy = a.y - b.y;
+        return dx * dx + dy * dy;
+    };
+
+    const Point2D& end_pos = path.back().pose.position;
+    const double dx_end = current_pose.position.x - end_pos.x;
+    const double dy_end = current_pose.position.y - end_pos.y;
+    const double dist_to_end_sq = dx_end * dx_end + dy_end * dy_end;
+
+    constexpr size_t kFullScanLimit = 200;
+    constexpr size_t kBack = 30;
+    constexpr size_t kAhead = 150;
+    constexpr double kEndThreshold = 0.1; // meters
+    constexpr double kEndThresholdSq = kEndThreshold * kEndThreshold;
+    constexpr double kNearEndFallbackDist = 0.6; // meters
+    constexpr double kNearEndFallbackDistSq =
+        kNearEndFallbackDist * kNearEndFallbackDist;
+
     size_t closest_idx = 0;
-    double min_dist = std::numeric_limits<double>::max();
-    for (size_t i = 0; i < path.size(); ++i) {
-        double dist = current_pose.position.distanceTo(path[i].pose.position);
-        if (dist < min_dist) {
-            min_dist = dist;
-            closest_idx = i;
+    double min_dist_sq = std::numeric_limits<double>::max();
+
+    const bool do_full_scan =
+        (n <= kFullScanLimit) || (dist_to_end_sq <= kNearEndFallbackDistSq);
+
+    if (do_full_scan) {
+        for (size_t i = 0; i < n; ++i) {
+            const double d2 = distSq(current_pose.position, path[i].pose.position);
+            if (d2 < min_dist_sq) {
+                min_dist_sq = d2;
+                closest_idx = i;
+            }
+        }
+    } else {
+        const size_t start = (closest_idx_ > kBack) ? (closest_idx_ - kBack) : 0;
+        const size_t end = std::min(n - 1, closest_idx_ + kAhead);
+        for (size_t i = start; i <= end; ++i) {
+            const double d2 = distSq(current_pose.position, path[i].pose.position);
+            if (d2 < min_dist_sq) {
+                min_dist_sq = d2;
+                closest_idx = i;
+            }
         }
     }
 
+    closest_idx_ = closest_idx;
+    // Pure pursuit lookahead search should start from the closest point.
+    lookahead_start_idx_ = closest_idx_;
+
     // Get target speed from the closest path point
-    double target_speed = path[closest_idx].speed;
+    double target_speed = path[closest_idx_].speed;
 
     // Get curvature from the closest path point
-    cmd.curvature = path[closest_idx].curvature;
+    cmd.curvature = path[closest_idx_].curvature;
 
     // Lateral control via pure pursuit
     cmd.steering_angle = purePursuit(current_pose, path);
@@ -46,9 +93,7 @@ ControlCommand MotionController::compute(Pose2D current_pose,
     cmd.speed = pidControl(target_speed, current_speed, 0.01);
 
     // Check if we've reached the last point on the path (distance < 0.1m)
-    double dist_to_end = current_pose.position.distanceTo(
-        path.back().pose.position);
-    if (dist_to_end < 0.1 && closest_idx >= path.size() - 2) {
+    if (dist_to_end_sq < kEndThresholdSq && closest_idx_ >= n - 2) {
         finished_ = true;
     }
 
@@ -59,7 +104,8 @@ void MotionController::reset() {
     integral_error_ = 0.0;
     prev_error_ = 0.0;
     prev_dt_ = 0.01;
-    current_target_idx_ = 0;
+    closest_idx_ = 0;
+    lookahead_start_idx_ = 0;
     finished_ = false;
 }
 
@@ -162,24 +208,29 @@ size_t MotionController::findLookaheadPoint(Pose2D current_pose,
     // Compute adaptive lookahead distance
     // Use speed from the current closest point as the speed estimate
     double speed = 0.0;
-    if (current_target_idx_ < path.size()) {
-        speed = std::abs(path[current_target_idx_].speed);
+    if (closest_idx_ < path.size()) {
+        speed = std::abs(path[closest_idx_].speed);
     }
     double lookahead_dist = lookahead_base_ + lookahead_k_ * speed;
+    const double lookahead_dist_sq = lookahead_dist * lookahead_dist;
 
-    // Starting from current_target_idx_, find the first path point
+    // Starting from lookahead_start_idx_, find the first path point
     // whose distance from current_pose >= lookahead_dist
-    for (size_t i = current_target_idx_; i < path.size(); ++i) {
-        double dist = current_pose.position.distanceTo(path[i].pose.position);
-        if (dist >= lookahead_dist) {
-            current_target_idx_ = i;
+    lookahead_start_idx_ = std::min(lookahead_start_idx_, path.size() - 1);
+    for (size_t i = lookahead_start_idx_; i < path.size(); ++i) {
+        const Point2D& p = path[i].pose.position;
+        const double dx = current_pose.position.x - p.x;
+        const double dy = current_pose.position.y - p.y;
+        const double dist_sq = dx * dx + dy * dy;
+        if (dist_sq >= lookahead_dist_sq) {
+            lookahead_start_idx_ = i;
             return i;
         }
     }
 
     // If no point found beyond lookahead distance, use the last point
     size_t last_idx = path.size() - 1;
-    current_target_idx_ = last_idx;
+    lookahead_start_idx_ = last_idx;
     return last_idx;
 }
 

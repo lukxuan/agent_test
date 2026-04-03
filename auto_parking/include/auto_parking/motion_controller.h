@@ -54,8 +54,11 @@ private:
     double prev_error_ = 0.0;
     double prev_dt_ = 0.01;
 
-    // State tracking
-    size_t current_target_idx_ = 0;
+    // State tracking:
+    // - closest_idx_：车辆当前帧估计的“最近路径点”
+    // - lookahead_start_idx_：pure pursuit 查找前视点的起始下标
+    size_t closest_idx_ = 0;
+    size_t lookahead_start_idx_ = 0;
     bool finished_ = false;
 };
 
