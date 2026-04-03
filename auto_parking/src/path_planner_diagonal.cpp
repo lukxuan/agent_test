@@ -18,8 +18,8 @@ std::vector<PathPoint> DiagonalPlanner::plan(
 
     // The diagonal slot has an angle (e.g., 30-60 degrees from driving direction)
     // Use the slot's angle to determine the arc sweep needed
-    double slot_angle = target.angle;
-    if (slot_angle <= 0.0) {
+    double slot_angle = std::abs(target.angle);
+    if (slot_angle <= 1e-6) {
         slot_angle = kPi / 4.0;  // default 45 degrees if not set
     }
 
@@ -53,7 +53,9 @@ std::vector<PathPoint> DiagonalPlanner::plan(
     double arc_angle = slot_angle;
 
     // Clamp arc angle to a reasonable range
-    arc_angle = std::clamp(arc_angle, 15.0 * kDeg2Rad, 75.0 * kDeg2Rad);
+    constexpr double kMinArcAngle = 15.0 * kDeg2Rad;
+    constexpr double kMaxArcAngle = 75.0 * kDeg2Rad;
+    arc_angle = std::clamp(arc_angle, kMinArcAngle, kMaxArcAngle);
 
     auto arc = generateArc(phase2_start, R, -arc_angle, -1.0, reverse_speed, params);
     full_path.insert(full_path.end(), arc.begin(), arc.end());
@@ -72,35 +74,14 @@ std::vector<PathPoint> DiagonalPlanner::plan(
                          dy * std::sin(phase3_start.yaw);
 
     if (std::abs(remain_dist) > 0.05) {
-        double adj_speed = (remain_dist > 0) ? 0.5 : reverse_speed * 0.5;
+        // Speed magnitude scales with remaining distance for smoother tracking.
+        // Keep it bounded to avoid overshoot and controller oscillations.
+        const double abs_remain = std::abs(remain_dist);
+        const double speed_mag = std::clamp(abs_remain * 0.2, 0.2, 0.5);
+        const double adj_speed = (remain_dist > 0) ? speed_mag
+                                                     : reverse_speed * speed_mag;
         auto straight = generateStraight(phase3_start, remain_dist, adj_speed, params);
         full_path.insert(full_path.end(), straight.begin(), straight.end());
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 4: Optional small adjustment to correct heading alignment
-    // ---------------------------------------------------------------
-    Pose2D phase4_start = full_path.empty() ? start : full_path.back().pose;
-
-    // Check heading error relative to slot orientation
-    double heading_error = normalizeAngle(target.angle + kPi - phase4_start.yaw);
-
-    // If heading error is significant, do a small corrective arc
-    if (std::abs(heading_error) > 2.0 * kDeg2Rad) {
-        // Clamp correction to avoid large movements
-        double correction = std::clamp(heading_error * 0.5, -0.3, 0.3);
-        double corr_speed = (correction > 0) ? forward_speed * 0.3 : reverse_speed * 0.3;
-        double corr_dir = (correction > 0) ? 1.0 : -1.0;
-
-        auto corr1 = generateArc(phase4_start, R, correction,
-                                  corr_dir, corr_speed, params);
-        full_path.insert(full_path.end(), corr1.begin(), corr1.end());
-
-        Pose2D corr1_end = corr1.empty() ? phase4_start : corr1.back().pose;
-        // Undo the correction to straighten the vehicle
-        auto corr2 = generateArc(corr1_end, R, -correction,
-                                  -corr_dir, -corr_speed, params);
-        full_path.insert(full_path.end(), corr2.begin(), corr2.end());
     }
 
     return full_path;
